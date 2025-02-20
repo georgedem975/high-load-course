@@ -22,6 +22,15 @@ class LeakingBucketRateLimiter(
         return queue.offer(1)
     }
 
+    fun tickBlocking() {
+        try {
+            queue.put(1)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw RuntimeException("Interrupted while waiting for rate limiter", e)
+        }
+    }
+
     private val releaseJob = rateLimiterScope.launch {
         while (true) {
             delay(window.toMillis())

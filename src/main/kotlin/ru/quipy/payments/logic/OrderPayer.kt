@@ -4,6 +4,7 @@ import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Service
+import ru.quipy.common.utils.LeakingBucketRateLimiter
 import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
@@ -23,6 +24,9 @@ class OrderPayer {
     @Autowired
     private lateinit var paymentService: PaymentService
 
+    @Autowired
+    private lateinit var leakingBucketRateLimiter: LeakingBucketRateLimiter
+
     private val paymentExecutor = ThreadPoolExecutor(
         16,
         16,
@@ -34,6 +38,9 @@ class OrderPayer {
 
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         val createdAt = System.currentTimeMillis()
+
+        leakingBucketRateLimiter.tickBlocking()
+
         paymentExecutor.submit {
             val createdEvent = paymentESService.create {
                 it.create(

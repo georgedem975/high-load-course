@@ -9,6 +9,6 @@ import java.time.Duration
 class RateLimiterConfiguration {
     @Bean
     fun leakingBucketRateLimiter(): LeakingBucketRateLimiter {
-        return LeakingBucketRateLimiter(rate = 2, window = Duration.ofSeconds(1), bucketSize = 30)
+        return LeakingBucketRateLimiter(rate = 5, window = Duration.ofSeconds(1), bucketSize = 30)
     }
 }

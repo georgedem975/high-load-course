@@ -75,8 +75,10 @@ class PaymentExternalSystemAdapterImpl(
                     return
                 }
 
+                val timeout = Duration.ofMillis(4000)
+
                 val request = Request.Builder().url(
-                    "http://localhost:1234/external/process?serviceName=$serviceName&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount"
+                    "http://localhost:1234/external/process?serviceName=$serviceName&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount&timeout=$timeout"
                 ).post(emptyBody).build()
 
                 try {

@@ -12,7 +12,9 @@ import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
+import java.util.concurrent.Executors
 import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class PaymentExternalSystemAdapterImpl(
@@ -39,6 +41,8 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimiter = SimpleRateLimiter(maxRequestsPerSec)
     private val maxRetryCount = 2
 
+    private val executorService = Executors.newFixedThreadPool(maxConcurrentRequests)
+
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Initiating payment process for $paymentId")
 
@@ -49,88 +53,87 @@ class PaymentExternalSystemAdapterImpl(
             it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
         }
 
-        var retryCount = 0
+        executorService.submit {
+            var retryCount = 0
+            while (retryCount <= maxRetryCount) {
+                var shouldRetry = false
 
-        while (retryCount <= maxRetryCount) {
-            var shouldRetry = false
-
-            if (!semaphore.tryAcquire()) {
-                cancelRequest(paymentId, transactionId, "Too many concurrent requests.")
-                return
-            }
-
-            try {
-                if (shouldCancelDueToDeadline(deadline)) {
-                    cancelRequest(paymentId, transactionId, "Estimated completion beyond deadline.")
-                    return
+                if (!semaphore.tryAcquire()) {
+                    cancelRequest(paymentId, transactionId, "Too many concurrent requests.")
+                    return@submit
                 }
-
-                if (!rateLimiter.tryAcquire()) {
-                    cancelRequest(paymentId, transactionId, "Rate limit exceeded.")
-                    return
-                }
-
-                if (shouldCancelDueToDeadline(deadline)) {
-                    cancelRequest(paymentId, transactionId, "Estimated completion beyond deadline after acquiring rate limit.")
-                    return
-                }
-
-                val timeout = Duration.ofMillis(4000)
-
-                val request = Request.Builder().url(
-                    "http://localhost:1234/external/process?serviceName=$serviceName&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount&timeout=$timeout"
-                ).post(emptyBody).build()
 
                 try {
-                    client.newCall(request).execute().use { response ->
-                        val body = try {
-                            mapper.readValue(response.body?.string() ?: "")
-                        } catch (e: Exception) {
-                            logger.error("[$accountName] [ERROR] Processing txId: $transactionId, payment: $paymentId failed, HTTP code: ${response.code}")
-                            ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
-                        }
+                    if (shouldCancelDueToDeadline(deadline)) {
+                        cancelRequest(paymentId, transactionId, "Estimated completion beyond deadline.")
+                        return@submit
+                    }
 
-                        logger.warn("[$accountName] Completed txId: $transactionId, payment: $paymentId, success: ${body.result}, message: ${body.message}")
+                    if (!rateLimiter.tryAcquire()) {
+                        cancelRequest(paymentId, transactionId, "Rate limit exceeded.")
+                        return@submit
+                    }
 
-                        paymentESService.update(paymentId) {
-                            it.logProcessing(body.result, now(), transactionId, reason = body.message)
-                        }
+                    if (shouldCancelDueToDeadline(deadline)) {
+                        cancelRequest(paymentId, transactionId, "Estimated completion beyond deadline after acquiring rate limit.")
+                        return@submit
+                    }
 
-                        if (body.result) {
-                            return
-                        } else {
-                            shouldRetry = retryCount < maxRetryCount
-                            if (shouldRetry) {
-                                retryCount++
-                                logger.warn("[$accountName] Retrying payment $paymentId, attempt: $retryCount")
+                    val timeout = Duration.ofMillis(19000)
+                    val request = Request.Builder().url(
+                        "http://localhost:1234/external/process?serviceName=$serviceName&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount&timeout=$timeout"
+                    ).post(emptyBody).build()
+
+                    try {
+                        client.newCall(request).execute().use { response ->
+                            val body = try {
+                                mapper.readValue(response.body?.string() ?: "")
+                            } catch (e: Exception) {
+                                logger.error("[$accountName] [ERROR] Processing txId: $transactionId, payment: $paymentId failed, HTTP code: ${response.code}")
+                                ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
+                            }
+
+                            logger.warn("[$accountName] Completed txId: $transactionId, payment: $paymentId, success: ${body.result}, message: ${body.message}")
+
+                            paymentESService.update(paymentId) {
+                                it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                            }
+
+                            if (body.result) {
+                                return@submit
+                            } else {
+                                shouldRetry = retryCount < maxRetryCount
+                                if (shouldRetry) {
+                                    retryCount++
+                                    logger.warn("[$accountName] Retrying payment $paymentId, attempt: $retryCount")
+                                }
                             }
                         }
-                    }
-                } catch (e: Exception) {
-                    when (e) {
-                        is SocketTimeoutException -> {
-                            logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
-                            cancelRequest(paymentId, transactionId, "Request timeout.")
+                    } catch (e: Exception) {
+                        when (e) {
+                            is SocketTimeoutException -> {
+                                logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
+                                cancelRequest(paymentId, transactionId, "Request timeout.")
+                            }
+                            else -> {
+                                logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+                                cancelRequest(paymentId, transactionId, e.message ?: "Unknown error.")
+                            }
                         }
-                        else -> {
-                            logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
-                            cancelRequest(paymentId, transactionId, e.message ?: "Unknown error.")
+                        shouldRetry = retryCount < maxRetryCount
+                        if (shouldRetry) {
+                            retryCount++
+                            logger.warn("[$accountName] Retrying payment $paymentId, attempt: $retryCount")
                         }
                     }
-
-                    shouldRetry = retryCount < maxRetryCount
-                    if (shouldRetry) {
-                        retryCount++
-                        logger.warn("[$accountName] Retrying payment $paymentId, attempt: $retryCount")
-                    }
+                } finally {
+                    rateLimiter.release()
+                    semaphore.release()
                 }
-            } finally {
-                rateLimiter.release()
-                semaphore.release()
-            }
 
-            if (!shouldRetry) {
-                break
+                if (!shouldRetry) {
+                    break
+                }
             }
         }
     }
@@ -143,6 +146,18 @@ class PaymentExternalSystemAdapterImpl(
         logger.error("[$accountName] Payment $paymentId aborted (txId: $transactionId) - $reason")
         paymentESService.update(paymentId) {
             it.logProcessing(false, now(), transactionId, reason = reason)
+        }
+    }
+
+    private fun shutdownExecutor() {
+        executorService.shutdown()
+        try {
+            if (!executorService.awaitTermination(60, TimeUnit.SECONDS)) {
+                executorService.shutdownNow()
+            }
+        } catch (ex: InterruptedException) {
+            executorService.shutdownNow()
+            Thread.currentThread().interrupt()
         }
     }
 

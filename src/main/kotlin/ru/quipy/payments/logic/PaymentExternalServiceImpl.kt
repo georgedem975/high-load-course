@@ -14,7 +14,6 @@ import java.time.Duration
 import java.util.*
 import java.util.concurrent.Executors
 import java.util.concurrent.Semaphore
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class PaymentExternalSystemAdapterImpl(
@@ -146,18 +145,6 @@ class PaymentExternalSystemAdapterImpl(
         logger.error("[$accountName] Payment $paymentId aborted (txId: $transactionId) - $reason")
         paymentESService.update(paymentId) {
             it.logProcessing(false, now(), transactionId, reason = reason)
-        }
-    }
-
-    private fun shutdownExecutor() {
-        executorService.shutdown()
-        try {
-            if (!executorService.awaitTermination(60, TimeUnit.SECONDS)) {
-                executorService.shutdownNow()
-            }
-        } catch (ex: InterruptedException) {
-            executorService.shutdownNow()
-            Thread.currentThread().interrupt()
         }
     }
 

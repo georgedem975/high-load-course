@@ -41,7 +41,6 @@ class PaymentExternalSystemAdapterImpl(
 
     private val semaphore = Semaphore(maxConcurrentRequests)
     private val rateLimiter = SimpleRateLimiter(maxRequestsPerSec)
-
     private val executorService = Executors.newVirtualThreadPerTaskExecutor()
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
@@ -70,22 +69,19 @@ class PaymentExternalSystemAdapterImpl(
     ): CompletableFuture<java.lang.Void> {
         if (shouldCancelDueToDeadline(deadline)) {
             cancelRequest(paymentId, transactionId, "Estimated completion beyond deadline.")
-            rateLimiter.release()
-            semaphore.release()
             return CompletableFuture.completedFuture(null)
         }
 
-        if (!rateLimiter.tryAcquire()) {
+        val acquiredRateLimiter = rateLimiter.tryAcquire()
+        if (!acquiredRateLimiter) {
             cancelRequest(paymentId, transactionId, "Rate limit exceeded.")
-            rateLimiter.release()
-            semaphore.release()
             return CompletableFuture.completedFuture(null)
         }
 
-        if (!semaphore.tryAcquire()) {
+        val acquiredSemaphore = semaphore.tryAcquire()
+        if (!acquiredSemaphore) {
             cancelRequest(paymentId, transactionId, "Too many concurrent requests.")
-            rateLimiter.release()
-            semaphore.release()
+            if (acquiredRateLimiter) rateLimiter.release()
             return CompletableFuture.completedFuture(null)
         }
 
@@ -109,7 +105,6 @@ class PaymentExternalSystemAdapterImpl(
                 }
             }
             .thenCompose { externalResponse ->
-
                 paymentESService.update(paymentId) {
                     it.logProcessing(externalResponse.result, now(), transactionId, reason = externalResponse.message)
                 }
@@ -125,8 +120,8 @@ class PaymentExternalSystemAdapterImpl(
                 }
             }
             .whenComplete { _, _ ->
-                rateLimiter.release()
-                semaphore.release()
+                if (acquiredRateLimiter) rateLimiter.release()
+                if (acquiredSemaphore) semaphore.release()
             }
     }
 
